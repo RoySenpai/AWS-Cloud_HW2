@@ -28,6 +28,18 @@ app.get('/', (req, res) => {
 app.post('/restaurants', async (req, res) => {
     const restaurant = req.body;
 
+    if (!restaurant.name || !restaurant.cuisine || !restaurant.region) {
+        console.error('POST /restaurants', 'Missing required fields');
+        res.status(400).send({ success: false, message: 'Missing required fields' });
+        return;
+    }
+
+    if (USE_CACHE) {
+        console.error('POST /restaurants', 'need to implement cache');
+        res.status(404).send("need to implement cache");
+        return;
+    }
+
     // Check if the restaurant already exists in the table before adding it (only dynamodb)
     const getParams = {
         TableName: TABLE_NAME,
@@ -36,23 +48,17 @@ app.post('/restaurants', async (req, res) => {
         }
     };
 
-    try
-    {
+    try {
         const data = await dynamodb.get(getParams).promise();
 
         if (data.Item) {
-            console.log("Restaurant already exists");
             res.status(409).send({ success: false, message: 'Restaurant already exists' });
             return;
         }
 
-        console.log("Restaurant does not exist, adding it to the table");
-    }
-
-    catch (err)
-    {
-        console.error('Fatal error reading data from DynamoDB', err);
-        res.status(500).send('Fatal error reading data from DynamoDB', err);
+    } catch (err) {
+        console.error('POST /restaurants', err);
+        res.status(500).send("Internal Server Error");
         return;
     }
 
@@ -61,22 +67,30 @@ app.post('/restaurants', async (req, res) => {
         TableName: TABLE_NAME,
         Item: {
             SimpleKey: restaurant.name,
-            cuisine: restaurant.cuisine,
-            region: restaurant.region,
-            rating: 0
+            Cuisine: restaurant.cuisine,
+            GeoRegion: restaurant.region,
+            Rating: 0,
+            RatingCount: 0
         }
     };
 
-    await dynamodb.put(params).promise().then(() => {
-        res.send({ success: true });
-    }).catch(err => {
-        console.error("Unable to add item. Error JSON:", JSON.stringify(err, null, 2));
-        res.status(500).send("Unable to add item");
-    });
+    try {
+        await dynamodb.put(params).promise();
+        res.status(200).send({ success: true });
+    } catch (err) {
+        console.error('POST /restaurants', err);
+        res.status(500).send("Internal Server Error");
+    }
 });
 
 app.get('/restaurants/:restaurantName', async (req, res) => {
     const restaurantName = req.params.restaurantName;
+
+    if (USE_CACHE) {
+        console.error('GET /restaurants/:restaurantName', 'need to implement cache');
+        res.status(404).send("need to implement cache");
+        return;
+    }
 
     // Check if the restaurant exists in the dynamodb table
     const params = {
@@ -86,12 +100,10 @@ app.get('/restaurants/:restaurantName', async (req, res) => {
         }
     };
 
-    try
-    {
+    try {
         const data = await dynamodb.get(params).promise();
 
         if (!data.Item) {
-            console.log("Restaurant does not exist");
             res.status(404).send({ message: 'Restaurant not found' });
             return;
         }
@@ -99,27 +111,25 @@ app.get('/restaurants/:restaurantName', async (req, res) => {
         // Parse the restaurant data
         const restaurant = {
             name: data.Item.SimpleKey,
-            cuisine: data.Item.cuisine,
-            rating: data.Item.rating,
-            region: data.Item.region
+            cuisine: data.Item.Cuisine,
+            rating: data.Item.Rating,
+            region: data.Item.GeoRegion
         };
 
-        console.log("Restaurant found");
         res.status(200).send(restaurant);
+    } catch (err) {
+        console.error('GET /restaurants/:restaurantName', err);
+        res.status(500).send('Internal Server Error');
     }
-
-    catch (err)
-    {
-        console.error('Fatal error reading data from DynamoDB', err);
-        res.status(500).send('Fatal error reading data from DynamoDB', err);
-    }
-
-    // Students TODO: Implement the logic to get a restaurant by name
-    //res.status(404).send("need to implement");
 });
 
 app.delete('/restaurants/:restaurantName', async (req, res) => {
     const restaurantName = req.params.restaurantName;
+
+    if (USE_CACHE) {
+        res.status(404).send("need to implement cache");
+        return;
+    }
 
     // Check if the restaurant exists in the dynamodb table (if not, return 404)
     const params = {
@@ -129,66 +139,226 @@ app.delete('/restaurants/:restaurantName', async (req, res) => {
         }
     };
 
-    try
-    {
+    try {
         const data = await dynamodb.get(params).promise();
 
         if (!data.Item) {
-            console.log('Restaurant', restaurantName, 'not found');
             res.status(404).send({ message: 'Restaurant not found' });
             return;
         }
 
-        await dynamodb.delete(params).promise().then(() => {
-            console.log('Restaurant', restaurantName, 'deleted successfully');
-            res.send({ success: true });
-        }).catch(err => {
-            console.error('Unable to delete item', err);
-            res.status(500).send('Unable to delete item', err);
-        });
+        await dynamodb.delete(params).promise();
+        console.log('Restaurant', restaurantName, 'deleted successfully');
+        res.status(200).send({ success: true });
+    } catch (err) {
+        console.error('DELETE /restaurants/:restaurantName', err);
+        res.status(500).send('Internal Server Error');
     }
-
-    catch (err)
-    {
-        console.error('Fatal error reading data from DynamoDB', err);
-        res.status(500).send('Fatal error reading data from DynamoDB', err);
-        return;
-    }
-    
-    // Students TODO: Implement the logic to delete a restaurant by name
-    //res.status(404).send("need to implement");
 });
 
 app.post('/restaurants/rating', async (req, res) => {
     const restaurantName = req.body.name;
-    const rating = req.body.rating;
-    
-    // Students TODO: Implement the logic to add a rating to a restaurant
-    res.status(404).send("need to implement");
+    const newRating = req.body.rating;
+
+    if (!restaurantName || !newRating) {
+        console.error('POST /restaurants/rating', 'Missing required fields');
+        res.status(400).send({ success: false, message: 'Missing required fields' });
+        return;
+    }
+
+    // Get the current data for the restaurant
+    const params = {
+        TableName: TABLE_NAME,
+        Key: {
+            SimpleKey: restaurantName
+        }
+    };
+
+    try {
+        const data = await dynamodb.get(params).promise();
+
+        if (!data.Item) {
+            res.status(404).send("Restaurant not found");
+            return;
+        }
+
+        // Calculate the new average rating
+        const oldRating = data.Item.Rating || 0;
+        const ratingCount = data.Item.RatingCount || 0;
+        const newAverageRating = ((oldRating * ratingCount) + newRating) / (ratingCount + 1);
+
+        // Update the restaurant's rating
+        const updateParams = {
+            TableName: TABLE_NAME,
+            Key: {
+                SimpleKey: restaurantName
+            },
+            UpdateExpression: 'set Rating = :r, RatingCount = :rc',
+            ExpressionAttributeValues: {
+                ':r': newAverageRating,
+                ':rc': ratingCount + 1
+            }
+        };
+
+        await dynamodb.update(updateParams).promise();
+
+        res.status(200).send({ success: true });
+    } catch (error) {
+        console.error('POST /restaurants/rating', error);
+        res.status(500).send("Internal Server Error");
+    }
 });
 
 app.get('/restaurants/cuisine/:cuisine', async (req, res) => {
     const cuisine = req.params.cuisine;
-    let limit = req.query.limit;
-    
-    // Students TODO: Implement the logic to get top rated restaurants by cuisine
-    res.status(404).send("need to implement");
+    let limit = parseInt(req.query.limit) || 10;
+    limit = Math.min(limit, 100);
+    const minRating = parseFloat(req.query.minRating) || 0;
+
+    if (!cuisine) {
+        console.error('GET /restaurants/cuisine/:cuisine', 'Missing required fields');
+        res.status(400).send( { success: false, message: 'Missing required fields' });
+        return;
+    }
+
+    if (minRating < 0 || minRating > 5) {
+        console.error('GET /restaurants/cuisine/:cuisine', 'Invalid rating');
+        res.status(400).send( { success: false, message: 'Invalid rating' });
+        return;
+    }
+
+    if (USE_CACHE) {
+        console.error('GET /restaurants/cuisine/:cuisine', 'need to implement cache');
+        res.status(404).send("need to implement cache");
+        return;
+    }
+
+    const params = {
+        TableName: TABLE_NAME,
+        IndexName: 'CuisineIndex',
+        KeyConditionExpression: 'Cuisine = :cuisine',
+        FilterExpression: 'Rating >= :minRating',
+        ExpressionAttributeValues: {
+            ':cuisine': cuisine,
+            ':minRating': minRating
+        },
+        Limit: limit,
+        ScanIndexForward: false // to get top-rated restaurants
+    };
+
+    try {
+        const data = await dynamodb.query(params).promise();
+
+        const restaurants = data.Items.map(item => {
+            return {
+                cuisine: item.Cuisine,
+                name: item.SimpleKey,
+                rating: item.Rating,
+                region: item.GeoRegion
+            };
+        });
+
+        res.json(restaurants);
+    } catch (error) {
+        console.error('GET /restaurants/cuisine/:cuisine', error);
+        res.status(500).send("Internal Server Error");
+    }
 });
 
 app.get('/restaurants/region/:region', async (req, res) => {
     const region = req.params.region;
-    let limit = req.query.limit;
-    
-    // Students TODO: Implement the logic to get top rated restaurants by region
-    res.status(404).send("need to implement");
+    let limit = parseInt(req.query.limit) || 10;
+    limit = Math.min(limit, 100);
+
+    if (!region) {
+        console.error('GET /restaurants/region/:region', 'Missing required fields');
+        res.status(400).send( { success: false, message: 'Missing required fields' });
+        return;
+    }
+
+    if (USE_CACHE) {
+        console.error('GET /restaurants/region/:region', 'need to implement cache');
+        res.status(404).send("need to implement cache");
+        return;
+    }
+
+    const params = {
+        TableName: TABLE_NAME,
+        IndexName: 'GeoRegionIndex',
+        KeyConditionExpression: 'GeoRegion = :geoRegion',
+        ExpressionAttributeValues: {
+            ':geoRegion': region
+        },
+        Limit: limit,
+        ScanIndexForward: false // to get top-rated restaurants
+    };
+
+    try {
+        const data = await dynamodb.query(params).promise();
+
+        const restaurants = data.Items.map(item => {
+            return {
+                cuisine: item.Cuisine,
+                name: item.SimpleKey,
+                rating: item.Rating,
+                region: item.GeoRegion
+            };
+        });
+
+        res.json(restaurants);
+    } catch (error) {
+        console.error('GET /restaurants/region/:region', error);
+        res.status(500).send("Internal Server Error");
+    }
 });
 
 app.get('/restaurants/region/:region/cuisine/:cuisine', async (req, res) => {
     const region = req.params.region;
     const cuisine = req.params.cuisine;
+    let limit = parseInt(req.query.limit) || 10;
+    limit = Math.min(limit, 100);
 
-    // Students TODO: Implement the logic to get top rated restaurants by region and cuisine
-    res.status(404).send("need to implement");
+    if (!region || !cuisine) {
+        console.error('GET /restaurants/region/:region/cuisine/:cuisine', 'Missing required fields');
+        res.status(400).send( { success: false, message: 'Missing required fields' });
+        return;
+    }
+
+    if (USE_CACHE) {
+        console.error('GET /restaurants/region/:region/cuisine/:cuisine', 'need to implement cache');
+        res.status(404).send("need to implement cache");
+        return;
+    }
+
+    const params = {
+        TableName: TABLE_NAME,
+        IndexName: 'GeoRegionCuisineIndex',
+        KeyConditionExpression: 'GeoRegion = :geoRegion and Cuisine = :cuisine',
+        ExpressionAttributeValues: {
+            ':geoRegion': region,
+            ':cuisine': cuisine
+        },
+        Limit: limit,
+        ScanIndexForward: false // to get top-rated restaurants
+    };
+
+    try {
+        const data = await dynamodb.query(params).promise();
+        
+        const restaurants = data.Items.map(item => {
+            return {
+                cuisine: item.Cuisine,
+                name: item.SimpleKey,
+                rating: item.Rating,
+                region: item.GeoRegion
+            };
+        });
+
+        res.json(restaurants);
+    } catch (error) {
+        console.error('GET /restaurants/region/:region/cuisine/:cuisine', error);
+        res.status(500).send('Internal Server Error');
+    }
 });
 
 app.listen(80, () => {
