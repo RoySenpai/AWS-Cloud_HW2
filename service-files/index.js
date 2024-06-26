@@ -25,18 +25,12 @@ app.get('/', (req, res) => {
     res.send(response);
 });
 
+// POST /restaurants
 app.post('/restaurants', async (req, res) => {
     const restaurant = req.body;
 
     if (!restaurant.name || !restaurant.cuisine || !restaurant.region) {
-        console.error('POST /restaurants', 'Missing required fields');
         res.status(400).send({ success: false, message: 'Missing required fields' });
-        return;
-    }
-
-    if (USE_CACHE) {
-        console.error('POST /restaurants', 'need to implement cache');
-        res.status(404).send("need to implement cache");
         return;
     }
 
@@ -48,18 +42,32 @@ app.post('/restaurants', async (req, res) => {
         }
     };
 
-    try {
-        const data = await dynamodb.get(getParams).promise();
+    if (USE_CACHE) {
+        try {
+            const cachedRestaurant = await memcachedActions.getRestaurants(restaurant.name);
+            if (cachedRestaurant) {
+                res.status(409).send({ success: false, message: 'Restaurant already exists' });
+                return;
+            }
+        } catch (cacheError) {
+            console.error('Error accessing memcached:', cacheError);
+        }
+    }
 
-        if (data.Item) {
-            res.status(409).send({ success: false, message: 'Restaurant already exists' });
+    else {
+        try {
+            const data = await dynamodb.get(getParams).promise();
+
+            if (data.Item) {
+                res.status(409).send({ success: false, message: 'Restaurant already exists' });
+                return;
+            }
+
+        } catch (err) {
+            console.error('POST /restaurants', err);
+            res.status(500).send("Internal Server Error");
             return;
         }
-
-    } catch (err) {
-        console.error('POST /restaurants', err);
-        res.status(500).send("Internal Server Error");
-        return;
     }
 
     // Add the restaurant to the DynamoDB table
@@ -69,13 +77,51 @@ app.post('/restaurants', async (req, res) => {
             SimpleKey: restaurant.name,
             Cuisine: restaurant.cuisine,
             GeoRegion: restaurant.region,
-            Rating: 0,
+            Rating: restaurant.rating || 0,
             RatingCount: 0
         }
     };
 
     try {
         await dynamodb.put(params).promise();
+
+        if (USE_CACHE) {
+            // Invalidate cache
+            const cacheKeysToInvalidate = [];
+
+            // Generate cache keys covering all possible limit values (10 to 100)
+            for (let limit = 10; limit <= 100; limit += 1) {
+                cacheKeysToInvalidate.push(`${restaurant.region}_limit_${limit}`);
+                cacheKeysToInvalidate.push(`${restaurant.region}_${restaurant.cuisine}_limit_${limit}`);
+
+                for (let minRating = 0; minRating <= 5; minRating += 0.1) {
+                    cacheKeysToInvalidate.push(`${restaurant.cuisine}_minRating_${minRating}_limit_${limit}`);
+                }
+            }
+
+            try {
+                const deletePromises = cacheKeysToInvalidate.map(key => memcachedActions.deleteRestaurants(key).catch(err => {
+                    if (err.cmdTokens && err.cmdTokens[0] === 'NOT_FOUND') {
+                        //console.log(`Cache key "${key}" not found, ignoring.`);
+                    } else {
+                        throw err; // Propagate other errors
+                    }
+                }));
+                await Promise.all(deletePromises);
+                //console.log('Cache invalidated for:', cacheKeysToInvalidate);
+            } catch (cacheError) {
+                console.error('Error invalidating memcached:', cacheError);
+            }
+
+            // Now add the new restaurant to the cache
+            try {
+                await memcachedActions.addRestaurants(restaurant.name, restaurant);
+                //console.log('Added to cache:', restaurant.name);
+            } catch (cacheError) {
+                console.error('Error adding to memcached:', cacheError);
+            }
+        }
+
         res.status(200).send({ success: true });
     } catch (err) {
         console.error('POST /restaurants', err);
@@ -83,16 +129,25 @@ app.post('/restaurants', async (req, res) => {
     }
 });
 
+// GET /restaurants/:restaurantName
 app.get('/restaurants/:restaurantName', async (req, res) => {
     const restaurantName = req.params.restaurantName;
 
     if (USE_CACHE) {
-        console.error('GET /restaurants/:restaurantName', 'need to implement cache');
-        res.status(404).send("need to implement cache");
-        return;
+        try {
+            const cachedRestaurant = await memcachedActions.getRestaurants(restaurantName);
+            if (cachedRestaurant) {
+                // Change the rating back to a number
+                cachedRestaurant.rating = parseFloat(cachedRestaurant.rating) || 0;
+                res.status(200).send(cachedRestaurant);
+                return;
+            }
+        } catch (cacheError) {
+            console.error('Error accessing memcached:', cacheError);
+        }
     }
 
-    // Check if the restaurant exists in the dynamodb table
+    // Check if the restaurant exists in the DynamoDB table
     const params = {
         TableName: TABLE_NAME,
         Key: {
@@ -112,9 +167,20 @@ app.get('/restaurants/:restaurantName', async (req, res) => {
         const restaurant = {
             name: data.Item.SimpleKey,
             cuisine: data.Item.Cuisine,
-            rating: data.Item.Rating,
+            rating: data.Item.Rating || 0,
             region: data.Item.GeoRegion
         };
+
+        // Add to cache if enabled
+        if (USE_CACHE) {
+            try {
+                // Change the rating to a string to match the cache format
+                restaurant.rating = restaurant.rating.toString();
+                await memcachedActions.addRestaurants(restaurantName, restaurant);
+            } catch (cacheError) {
+                console.error('Error adding to memcached:', cacheError);
+            }
+        }
 
         res.status(200).send(restaurant);
     } catch (err) {
@@ -123,15 +189,11 @@ app.get('/restaurants/:restaurantName', async (req, res) => {
     }
 });
 
+// DELETE /restaurants/:restaurantName
 app.delete('/restaurants/:restaurantName', async (req, res) => {
     const restaurantName = req.params.restaurantName;
 
-    if (USE_CACHE) {
-        res.status(404).send("need to implement cache");
-        return;
-    }
-
-    // Check if the restaurant exists in the dynamodb table (if not, return 404)
+    // Delete the restaurant from DynamoDB
     const params = {
         TableName: TABLE_NAME,
         Key: {
@@ -147,6 +209,48 @@ app.delete('/restaurants/:restaurantName', async (req, res) => {
             return;
         }
 
+        if (USE_CACHE) {
+            try {
+                await memcachedActions.deleteRestaurants(restaurantName);
+                //console.log('Cache invalidated for:', restaurantName);
+            } catch (cacheError) {
+                console.error('Error invalidating memcached:', cacheError);
+            }
+    
+            try {
+                // Invalidate cache
+                const cacheKeysToInvalidate = [];
+    
+                // Generate cache keys covering all possible limit values (10 to 100)
+                for (let limit = 10; limit <= 100; limit += 1) {
+                    cacheKeysToInvalidate.push(`${data.Item.region}_limit_${limit}`);
+                    cacheKeysToInvalidate.push(`${data.Item.region}_${data.Item.cuisine}_limit_${limit}`);
+    
+                    for (let minRating = 0; minRating <= 5; minRating += 0.1) {
+                        cacheKeysToInvalidate.push(`${data.Item.cuisine}_minRating_${minRating}_limit_${limit}`);
+                    }
+                }
+    
+                try {
+                    const deletePromises = cacheKeysToInvalidate.map(key => memcachedActions.deleteRestaurants(key).catch(err => {
+                        if (err.cmdTokens && err.cmdTokens[0] === 'NOT_FOUND') {
+                            //console.log(`Cache key "${key}" not found, ignoring.`);
+                        } else {
+                            throw err; // Propagate other errors
+                        }
+                    }));
+                    await Promise.all(deletePromises);
+                    //console.log('Cache invalidated for:', cacheKeysToInvalidate);
+                } catch (cacheError) {
+                    console.error('Error invalidating memcached:', cacheError);
+                }
+    
+            } catch (cacheError) {
+                console.error('Error invalidating memcached:', cacheError);
+                // Handle cache invalidation error if needed
+            }
+        }
+
         await dynamodb.delete(params).promise();
         console.log('Restaurant', restaurantName, 'deleted successfully');
         res.status(200).send({ success: true });
@@ -156,6 +260,7 @@ app.delete('/restaurants/:restaurantName', async (req, res) => {
     }
 });
 
+// POST /restaurants/rating
 app.post('/restaurants/rating', async (req, res) => {
     const restaurantName = req.body.name;
     const newRating = req.body.rating;
@@ -202,6 +307,51 @@ app.post('/restaurants/rating', async (req, res) => {
 
         await dynamodb.update(updateParams).promise();
 
+        // Purge the cache for this restaurant
+        if (USE_CACHE) {
+            try {
+                // Update the rating in the cache
+                await memcachedActions.addRestaurants(restaurantName, {
+                    name: restaurantName,
+                    cuisine: data.Item.Cuisine,
+                    rating: newAverageRating.toString(),
+                    region: data.Item.GeoRegion
+                });
+
+                //console.log('Cache invalidated for:', restaurantName);
+
+                // Invalidate cache also for all possible cache keys that contain this restaurant
+                const cacheKeysToInvalidate = [];
+
+                // Generate cache keys covering all possible limit values (10 to 100)
+                for (let limit = 10; limit <= 100; limit += 1) {
+                    cacheKeysToInvalidate.push(`${data.Item.region}_limit_${limit}`);
+                    cacheKeysToInvalidate.push(`${data.Item.region}_${data.Item.cuisine}_limit_${limit}`);
+
+                    for (let minRating = 0; minRating <= 5; minRating += 0.1) {
+                        cacheKeysToInvalidate.push(`${data.Item.cuisine}_minRating_${minRating}_limit_${limit}`);
+                    }
+                }
+
+                try {
+                    const deletePromises = cacheKeysToInvalidate.map(key => memcachedActions.deleteRestaurants(key).catch(err => {
+                        if (err.cmdTokens && err.cmdTokens[0] === 'NOT_FOUND') {
+                            //console.log(`Cache key "${key}" not found, ignoring.`);
+                        } else {
+                            throw err; // Propagate other errors
+                        }
+                    }));
+                    await Promise.all(deletePromises);
+                    //console.log('Cache invalidated for:', cacheKeysToInvalidate);
+                } catch (cacheError) {
+                    console.error('Error invalidating memcached:', cacheError);
+                }
+
+            } catch (cacheError) {
+                console.error('Error invalidating memcached:', cacheError);
+            }
+        }
+
         res.status(200).send({ success: true });
     } catch (error) {
         console.error('POST /restaurants/rating', error);
@@ -209,6 +359,7 @@ app.post('/restaurants/rating', async (req, res) => {
     }
 });
 
+// GET /restaurants/cuisine/:cuisine
 app.get('/restaurants/cuisine/:cuisine', async (req, res) => {
     const cuisine = req.params.cuisine;
     let limit = parseInt(req.query.limit) || 10;
@@ -217,30 +368,43 @@ app.get('/restaurants/cuisine/:cuisine', async (req, res) => {
 
     if (!cuisine) {
         console.error('GET /restaurants/cuisine/:cuisine', 'Missing required fields');
-        res.status(400).send( { success: false, message: 'Missing required fields' });
+        res.status(400).send({ success: false, message: 'Missing required fields' });
         return;
     }
 
     if (minRating < 0 || minRating > 5) {
         console.error('GET /restaurants/cuisine/:cuisine', 'Invalid rating');
-        res.status(400).send( { success: false, message: 'Invalid rating' });
+        res.status(400).send({ success: false, message: 'Invalid rating' });
         return;
     }
 
+    const cacheKey = `${cuisine}_minRating_${minRating}_limit_${limit}`;
+
     if (USE_CACHE) {
-        console.error('GET /restaurants/cuisine/:cuisine', 'need to implement cache');
-        res.status(404).send("need to implement cache");
-        return;
+        try {
+            const cachedRestaurants = await memcachedActions.getRestaurants(cacheKey);
+            if (cachedRestaurants) {
+                //console.log('Cache hit for:', cacheKey);
+                // Convert the rating back to a number
+                cachedRestaurants.forEach(restaurant => {
+                    restaurant.rating = parseFloat(restaurant.rating) || 0;
+                });
+                res.status(200).json(cachedRestaurants);
+                return;
+            } else {
+                //console.log('Cache miss for:', cacheKey);
+            }
+        } catch (cacheError) {
+            console.error('Error accessing memcached:', cacheError);
+        }
     }
 
     const params = {
         TableName: TABLE_NAME,
         IndexName: 'CuisineIndex',
         KeyConditionExpression: 'Cuisine = :cuisine',
-        FilterExpression: 'Rating >= :minRating',
         ExpressionAttributeValues: {
             ':cuisine': cuisine,
-            ':minRating': minRating
         },
         Limit: limit,
         ScanIndexForward: false // to get top-rated restaurants
@@ -249,22 +413,33 @@ app.get('/restaurants/cuisine/:cuisine', async (req, res) => {
     try {
         const data = await dynamodb.query(params).promise();
 
-        const restaurants = data.Items.map(item => {
-            return {
-                cuisine: item.Cuisine,
-                name: item.SimpleKey,
-                rating: item.Rating,
-                region: item.GeoRegion
-            };
-        });
+        // Filter results based on minRating if not using FilterExpression in DynamoDB query
+        const filteredRestaurants = data.Items.filter(item => item.Rating >= minRating);
 
-        res.json(restaurants);
+        const restaurants = filteredRestaurants.map(item => ({
+            cuisine: item.Cuisine,
+            name: item.SimpleKey,
+            rating: item.Rating,
+            region: item.GeoRegion
+        }));
+
+        if (USE_CACHE) {
+            try {
+                await memcachedActions.addRestaurants(cacheKey, restaurants);
+                //console.log('Added to cache:', cacheKey);
+            } catch (cacheError) {
+                console.error('Error adding to memcached:', cacheError);
+            }
+        }
+
+        res.status(200).json(restaurants);
     } catch (error) {
         console.error('GET /restaurants/cuisine/:cuisine', error);
         res.status(500).send("Internal Server Error");
     }
 });
 
+// GET /restaurants/region/:region
 app.get('/restaurants/region/:region', async (req, res) => {
     const region = req.params.region;
     let limit = parseInt(req.query.limit) || 10;
@@ -272,14 +447,30 @@ app.get('/restaurants/region/:region', async (req, res) => {
 
     if (!region) {
         console.error('GET /restaurants/region/:region', 'Missing required fields');
-        res.status(400).send( { success: false, message: 'Missing required fields' });
+        res.status(400).send({ success: false, message: 'Missing required fields' });
         return;
     }
 
+    const cacheKey = `${region}_limit_${limit}`;
+
     if (USE_CACHE) {
-        console.error('GET /restaurants/region/:region', 'need to implement cache');
-        res.status(404).send("need to implement cache");
-        return;
+        try {
+            const cachedRestaurants = await memcachedActions.getRestaurants(cacheKey);
+            if (cachedRestaurants) {
+                //console.log('Cache hit for:', cacheKey);
+
+                // Convert the rating back to a number
+                cachedRestaurants.forEach(restaurant => {
+                    restaurant.rating = parseFloat(restaurant.rating) || 0;
+                });
+                res.status(200).send(cachedRestaurants);
+                return;
+            } else {
+                //console.log('Cache miss for:', cacheKey);
+            }
+        } catch (cacheError) {
+            console.error('Error accessing memcached:', cacheError);
+        }
     }
 
     const params = {
@@ -305,13 +496,23 @@ app.get('/restaurants/region/:region', async (req, res) => {
             };
         });
 
-        res.json(restaurants);
+        if (USE_CACHE) {
+            try {
+                await memcachedActions.addRestaurants(cacheKey, restaurants);
+                //console.log('Added to cache:', cacheKey);
+            } catch (cacheError) {
+                console.error('Error adding to memcached:', cacheError);
+            }
+        }
+
+        res.status(200).json(restaurants);
     } catch (error) {
         console.error('GET /restaurants/region/:region', error);
         res.status(500).send("Internal Server Error");
     }
 });
 
+// GET /restaurants/region/:region/cuisine/:cuisine
 app.get('/restaurants/region/:region/cuisine/:cuisine', async (req, res) => {
     const region = req.params.region;
     const cuisine = req.params.cuisine;
@@ -320,14 +521,30 @@ app.get('/restaurants/region/:region/cuisine/:cuisine', async (req, res) => {
 
     if (!region || !cuisine) {
         console.error('GET /restaurants/region/:region/cuisine/:cuisine', 'Missing required fields');
-        res.status(400).send( { success: false, message: 'Missing required fields' });
+        res.status(400).send({ success: false, message: 'Missing required fields' });
         return;
     }
 
+    const cacheKey = `${region}_${cuisine}_limit_${limit}`;
+
     if (USE_CACHE) {
-        console.error('GET /restaurants/region/:region/cuisine/:cuisine', 'need to implement cache');
-        res.status(404).send("need to implement cache");
-        return;
+        try {
+            const cachedRestaurants = await memcachedActions.getRestaurants(cacheKey);
+            if (cachedRestaurants) {
+                //console.log('Cache hit for:', cacheKey);
+
+                // Convert the rating back to a number
+                cachedRestaurants.forEach(restaurant => {
+                    restaurant.rating = parseFloat(restaurant.rating) || 0;
+                });
+                res.status(200).send(cachedRestaurants);
+                return;
+            } else {
+                //console.log('Cache miss for:', cacheKey);
+            }
+        } catch (cacheError) {
+            console.error('Error accessing memcached:', cacheError);
+        }
     }
 
     const params = {
@@ -344,7 +561,7 @@ app.get('/restaurants/region/:region/cuisine/:cuisine', async (req, res) => {
 
     try {
         const data = await dynamodb.query(params).promise();
-        
+
         const restaurants = data.Items.map(item => {
             return {
                 cuisine: item.Cuisine,
@@ -354,7 +571,16 @@ app.get('/restaurants/region/:region/cuisine/:cuisine', async (req, res) => {
             };
         });
 
-        res.json(restaurants);
+        if (USE_CACHE) {
+            try {
+                await memcachedActions.addRestaurants(cacheKey, restaurants);
+                //console.log('Added to cache:', cacheKey);
+            } catch (cacheError) {
+                console.error('Error adding to memcached:', cacheError);
+            }
+        }
+
+        res.status(200).json(restaurants);
     } catch (error) {
         console.error('GET /restaurants/region/:region/cuisine/:cuisine', error);
         res.status(500).send('Internal Server Error');

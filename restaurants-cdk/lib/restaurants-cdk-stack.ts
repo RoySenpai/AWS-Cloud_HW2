@@ -12,7 +12,7 @@ import * as s3Deployment from 'aws-cdk-lib/aws-s3-deployment';
 export class RestaurantsCdkStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
-    const useCacheFlag = false;
+    const useCacheFlag = true;
 
     // Students TODO Account Details: Change to your account id
     const labRole = iam.Role.fromRoleArn(this, 'Role', "arn:aws:iam::492027459158:role/LabRole", { mutable: false });
