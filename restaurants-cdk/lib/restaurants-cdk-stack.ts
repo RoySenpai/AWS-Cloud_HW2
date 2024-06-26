@@ -107,7 +107,7 @@ export class RestaurantsCdkStack extends cdk.Stack {
       vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
       role: labRole,
       minCapacity: 1, // Note for students: you may need to change this min capacity for scaling testing if you belive that is right
-      maxCapacity: 1, // Note for students: you may need to change this max capacity for scaling testing if you belive that is right
+      maxCapacity: 3, // Note for students: you may need to change this max capacity for scaling testing if you belive that is right
       desiredCapacity: 1, // Note for students: you may need to change this desired capacity for scaling testing if you belive that is right
     });
 
