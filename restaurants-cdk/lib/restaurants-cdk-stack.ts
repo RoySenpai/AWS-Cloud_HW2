@@ -24,9 +24,9 @@ export class RestaurantsCdkStack extends cdk.Stack {
 
     this.createNatGatewayForPrivateSubnet(vpc);
 
-    const memcachedConfigurationEndpoint = this.createMemcachedSingleInstaceInPublicSubnetForTestingPurpose(vpc, labRole);
+    //const memcachedConfigurationEndpoint = this.createMemcachedSingleInstaceInPublicSubnetForTestingPurpose(vpc, labRole);
     // Students TODO: Comment out the above line and uncomment the below line to use Elasticache, for the testing phase
-    // const memcachedConfigurationEndpoint = this.createMemcachedElasticache(vpc, labRole);
+    const memcachedConfigurationEndpoint = this.createMemcachedElasticache(vpc, labRole);
 
     const table = this.createDynamoDBTable();
 

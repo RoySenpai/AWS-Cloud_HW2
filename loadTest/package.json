@@ -1,0 +1,17 @@
+{
+  "name": "loadtest",
+  "version": "1.0.0",
+  "main": "loadTest.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node loadTest.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "assert": "^2.1.0",
+    "http": "^0.0.1-security"
+  }
+}
