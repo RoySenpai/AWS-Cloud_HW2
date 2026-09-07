@@ -16,7 +16,7 @@
     "memcache-client": "^1.0.5"
   },
   "devDependencies": {
-    "jest": "^30.4.2",
+    "jest": "^30.5.1",
     "supertest": "^7.0.0"
   }
 }
